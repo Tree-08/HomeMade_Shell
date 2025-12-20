@@ -1,26 +1,45 @@
-# shell_c
+# HomeMade Shell (C)
 
-lowkey just a shell implementation in C. wrote this to understand how process control and syscalls work under the hood.
+A POSIX-style Unix shell implemented in C to gain a deeper understanding of
+process control, system calls, and terminal I/O in Unix-based operating systems.
 
-it's not bash but it gets the job done.
+This project focuses on replicating core shell behavior rather than full
+bash compatibility.
 
-### features
-- **basic execution:** runs external programs (`ls`, `cat`, `vim`, etc) by searching your PATH.
-- **builtins:** implemented `cd`, `pwd`, `echo`, `type`, and `exit` manually.
-- **redirections:** supports `>` (overwrite), `>>` (append), and `2>` (stderr). handled via `dup2`.
-- **quoting:** handles single `'` and double `"` quotes so you can handle arguments with spaces.
-- **tab autocomplete:** legit works. press tab to autocomplete commands. press twice to list matches.
-- **raw mode:** implemented custom input handling for backspace and tab keys.
+---
 
-### how to run
-compile it with gcc. no external libs needed.
+## Features
+
+- **External Command Execution**
+  Executes binaries by resolving commands through the `PATH` environment variable
+  using `fork`, `execv`, and `waitpid`.
+
+- **Built-in Commands**
+  Implements `cd`, `pwd`, `echo`, `type`, and `exit` directly within the shell.
+
+- **I/O Redirection**
+  Supports output and error redirection (`>`, `>>`, `2>`) using low-level file
+  descriptor manipulation via `open`, `dup`, and `dup2`.
+
+- **Command Parsing**
+  Custom lexer and parser handling single and double quotes, escape characters,
+  and whitespace-delimited arguments.
+
+- **Tab Autocompletion**
+  Provides interactive command autocompletion by scanning executables in the
+  current directory and `$PATH`, computing longest common prefixes, and listing
+  candidate matches.
+
+- **Raw Terminal Input**
+  Uses `termios` to enable non-canonical input mode for real-time character
+  processing, backspace handling, and tab-based interaction.
+
+---
+
+## Build & Run
+
+No external dependencies are required.
 
 ```bash
 gcc main.c -o myshell
 ./myshell
-```
-
-### notes
-- the parsing logic is custom, so don't try anything too cursed with nested quotes.
-- autocomplete scans the current directory and PATH, so it might lag if your system is bloated.
-- if it segfaults, that's a skill issue.
