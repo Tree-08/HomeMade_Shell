@@ -12,10 +12,11 @@
 #include <signal.h>
 
 #define MAXN 1024
-#define PMAXN 2048
+#define PMAXN 4096
 
 struct termios orig_termios;
 const char *builtin_cmd[] = {"echo","exit","type","pwd","cd", NULL};
+
 typedef struct {
     char **items;
     int count;
@@ -24,21 +25,58 @@ typedef struct {
 
 StringList *history = NULL;
 
+// --- StringList Helpers ---
+
 StringList *init_string_list(){
     StringList *list = malloc(sizeof(StringList));
     list->count=0;
     list->capacity=4;
     list->items= malloc(list->capacity*sizeof(char *));
-
     return list;
 }
 
 void free_list(StringList *list) {
+    if (!list) return;
     for (int i = 0; i < list->count; i++) {
         free(list->items[i]);
     }
     free(list->items);
     free(list);
+}
+
+void list_add(StringList *list, char *str) {
+    if (list->count >= list->capacity) {
+        list->capacity *= 2;
+        list->items = realloc(list->items, list->capacity * sizeof(char *));
+        if (!list->items) {
+            perror("realloc failed");
+            exit(EXIT_FAILURE);
+        }
+    }
+    list->items[list->count++] = strdup(str);
+}
+
+char* get_executable_path(char *command) {
+    char *path = getenv("PATH");
+    if (!path) return NULL;
+
+    char *pathcpy = strdup(path);
+    if (!pathcpy) return NULL;
+
+    char *dir = strtok(pathcpy, ":");
+    static char full_path[PMAXN]; 
+
+    while(dir != NULL){
+        snprintf(full_path, PMAXN, "%s/%s", dir, command);
+        if(access(full_path, X_OK) == 0){
+            free(pathcpy);
+            return full_path;
+        }
+        dir = strtok(NULL, ":");
+    }
+    
+    free(pathcpy);
+    return NULL;
 }
 
 int shell_cd(char **args);
@@ -65,10 +103,23 @@ int shell_cd(char **args){
     }
     else target_path = args[1];
 
+    // [FIX] Update PWD and OLDPWD
+    char old_pwd[PMAXN];
+    if (getcwd(old_pwd, sizeof(old_pwd)) == NULL) {
+        perror("getcwd failed");
+    }
+
     if(chdir(target_path) != 0){
         printf("cd: %s: No such file or directory\n", target_path);
         return 0;
     }
+
+    char new_pwd[PMAXN];
+    if (getcwd(new_pwd, sizeof(new_pwd)) != NULL) {
+        setenv("OLDPWD", old_pwd, 1);
+        setenv("PWD", new_pwd, 1);
+    }
+
     return 1;
 }
 
@@ -103,28 +154,14 @@ int shell_type(char **args){
         return 1;
     }
 
-    char *path = getenv("PATH");
-    char pathcpy[MAXN];
-    char full_path[PMAXN];
-    bool found = false;
-    strcpy(pathcpy, path);
-    char *dir = strtok(pathcpy, ":");
-    while(dir!=NULL){
-        // string concatenation safer
-        snprintf(full_path, PMAXN, "%s/%s", dir, target_cmd);
-        if(access(full_path, X_OK) == 0){
-            printf("%s is %s\n", target_cmd, full_path);
-            found = true;
-            break;
-        }
-
-        dir = strtok(NULL, ":");
-    }
-    if(!found){
+    char *path = get_executable_path(target_cmd);
+    if (path) {
+        printf("%s is %s\n", target_cmd, path);
+        return 1;
+    } else {
         printf("%s: not found\n", target_cmd);
         return 0;
     }
-    return 1;
 }
 
 int shell_exit(char **args){
@@ -132,26 +169,20 @@ int shell_exit(char **args){
 }
 
 int run_external(char **args, char *out_file, int fd_flags, bool is_err){
+    
+    char *full_path = NULL;
+    char *cmd_path = get_executable_path(args[0]);
 
-    char *path = getenv("PATH");
-    char pathcpy[PMAXN]; strcpy(pathcpy, path);
-    char full_path[PMAXN] = {0};
-    bool found =0;
-    char *dir = strtok(pathcpy, ":");
-
-    while(dir!=NULL){
-        // string concatenation safer
-        snprintf(full_path, PMAXN, "%s/%s", dir, args[0]);
-        if(access(full_path, X_OK) == 0){
-            found = true;
-            break;
+    // If not in path, check if it's a direct path (e.g. ./main)
+    if (cmd_path == NULL) {
+        if (access(args[0], X_OK) == 0) {
+            full_path = args[0];
+        } else {
+            printf("%s: command not found\n", args[0]);
+            return 0;
         }
-
-        dir = strtok(NULL, ":");
-    }
-    if(!found){
-        printf("%s: command not found\n", args[0]);
-        return 0;
+    } else {
+        full_path = cmd_path;
     }
 
     int status;
@@ -181,13 +212,14 @@ int run_external(char **args, char *out_file, int fd_flags, bool is_err){
 
         signal(SIGINT, SIG_DFL);
         signal(SIGTSTP, SIG_DFL);
+        
         execv(full_path, args);
         perror("EXECV FAILED!");
         exit(EXIT_FAILURE);
     }
 
     else if(pid > 0){
-        // WUNTRACED matlab CHILD stopped but not traced by ptrace
+        // WUNTRACED allows parent to return if child stops
         waitpid(pid, &status, WUNTRACED);
     }
 
@@ -204,6 +236,8 @@ int execute_command(char **args){
     char *out_file = NULL;
     bool is_err = 0;
     int fd_args = O_WRONLY | O_CREAT | O_TRUNC;
+    
+    // Parsing for redirection
     for(int i=0; args[i]!=NULL; i++){
         if(strcmp(args[i], ">") == 0 || strcmp(args[i], "1>") == 0){
             if(args[i+1] == NULL){
@@ -224,7 +258,6 @@ int execute_command(char **args){
             is_err = 1;
             break;
         }
-
         else if(strcmp(args[i], ">>") == 0 || strcmp(args[i], "1>>") == 0){
             if(args[i+1] == NULL){
                 fprintf(stderr, "syntax error: file name expected after '>>'\n");
@@ -235,7 +268,6 @@ int execute_command(char **args){
             fd_args = O_WRONLY | O_CREAT | O_APPEND;
             break;
         }
-
         else if(strcmp(args[i], "2>>") == 0){
             if(args[i+1] == NULL){
                 fprintf(stderr, "syntax error: file name expected after '>>'\n");
@@ -264,14 +296,16 @@ int execute_command(char **args){
     return rtrn;
 }
 
-void custom_parse(char *input_cmd, char **exec_argv, int *exec_argc){
+
+StringList *custom_parse(char *input_cmd){
+    StringList *tokens = init_string_list();
     enum { NOT_IN, IN_SGL, IN_DBL } state = NOT_IN;
 
-    char *p   = input_cmd;   // read
+    char *p    = input_cmd;   // read
     char *dst = input_cmd;   // write
-
-    int argc     = 0;
+    
     int in_token = 0;
+    char *current_token_start = NULL;
 
     while (*p) {
         switch (state) {
@@ -281,37 +315,27 @@ void custom_parse(char *input_cmd, char **exec_argv, int *exec_argc){
                     *dst = '\0';
                     dst++;
                     in_token = 0;
+                    list_add(tokens, current_token_start);
                 }
-                p++;
-            } else if (*p == '\\') {
-                p++;
-                if (*p) {
-                    if (!in_token) {
-                        exec_argv[argc++] = dst;
-                        in_token = 1;
-                    }
-                    *dst++ = *p++;
-                }
-            } else if (*p == '\'') {
-                if (!in_token) {
-                    exec_argv[argc++] = dst;
-                    in_token = 1;
-                }
-                state = IN_SGL;
-                p++;
-            } else if (*p == '"') {
-                if (!in_token) {
-                    exec_argv[argc++] = dst;
-                    in_token = 1;
-                }
-                state = IN_DBL;
                 p++;
             } else {
                 if (!in_token) {
-                    exec_argv[argc++] = dst;
+                    current_token_start = dst;
                     in_token = 1;
                 }
-                *dst++ = *p++;
+                
+                if (*p == '\\') {
+                    p++;
+                    if (*p) *dst++ = *p++;
+                } else if (*p == '\'') {
+                    state = IN_SGL;
+                    p++;
+                } else if (*p == '"') {
+                    state = IN_DBL;
+                    p++;
+                } else {
+                    *dst++ = *p++;
+                }
             }
             break;
 
@@ -349,12 +373,25 @@ void custom_parse(char *input_cmd, char **exec_argv, int *exec_argc){
         }
     }
 
-    if (in_token) {
-        *dst = '\0';
+    if (state != NOT_IN) {
+        fprintf(stderr, "Error: Unclosed quote detected.\n");
+        free_list(tokens);
+        return NULL;
     }
 
-    exec_argv[argc] = NULL;
-    *exec_argc = argc;
+    if (in_token) {
+        *dst = '\0';
+        list_add(tokens, current_token_start);
+    }
+
+    if (tokens->count >= tokens->capacity) {
+        tokens->capacity++;
+        tokens->items = realloc(tokens->items, tokens->capacity * sizeof(char *));
+        if(!tokens->items) exit(1);
+    }
+    tokens->items[tokens->count] = NULL;
+
+    return tokens;
 }
 
 void disableRawMode(){
@@ -383,26 +420,22 @@ StringList *findExecs(const char *partial_cmd) {
     int partial_len = strlen(partial_cmd);
     char *path_env = getenv("PATH");
     
-    char *path_cpy = path_env ? strdup(path_env) : NULL;
-    
-    char *dir = path_cpy ? strtok(path_cpy, ":") : NULL;
-    while (dir != NULL || path_cpy != NULL) {
-        char *current_search_dir = dir ? dir : "."; 
-        if (dir == NULL) path_cpy = NULL; 
+    if (!path_env) return results;
 
-        DIR *d = opendir(current_search_dir);
+    char *path_cpy = strdup(path_env);
+    if (!path_cpy) return results;
+    
+    char *dir = strtok(path_cpy, ":");
+    while (dir != NULL) {
+        DIR *d = opendir(dir);
         if (d) {
             struct dirent *entry;
             while ((entry = readdir(d)) != NULL) {
                 if (strncmp(entry->d_name, partial_cmd, partial_len) == 0) {
                     struct stat st;
-                    char full_path[MAXN];
+                    char full_path[PMAXN];
                     
-                    if (strcmp(current_search_dir, ".") == 0) {
-                        snprintf(full_path, sizeof(full_path), "%s", entry->d_name);
-                    } else {
-                        snprintf(full_path, sizeof(full_path), "%s/%s", current_search_dir, entry->d_name);
-                    }
+                    snprintf(full_path, sizeof(full_path), "%s/%s", dir, entry->d_name);
 
                     if (stat(full_path, &st) == 0 && !S_ISDIR(st.st_mode) && (st.st_mode & S_IXUSR)) {
                         if (results->count == results->capacity) {
@@ -415,10 +448,10 @@ StringList *findExecs(const char *partial_cmd) {
             }
             closedir(d);
         }
-        if (dir) dir = strtok(NULL, ":");
+        dir = strtok(NULL, ":");
     }
-    if (path_env) free(path_cpy);
-                                  
+    free(path_cpy);
+                                   
 
     qsort(results->items, results->count, sizeof(char *), compare_strings);
 
@@ -468,7 +501,6 @@ void store_history(char *cmd){
 
 void read_input_raw(char *buffer) {
     int len = 0;
-    int pos =0;
     char c;
     int tab_presses = 0;
 
@@ -519,17 +551,8 @@ void read_input_raw(char *buffer) {
                             }
                             break;
                         case 'C': //RIGHT
-                            // if(pos < len){
-                            //     pos++;
-                            //     printf("\033[C");
-                            //     fflush(stdout);
-                            // }
                             break;
                         case 'D': //LEFT
-                            // if(pos>0){
-                            //     pos--;
-                            //     printf("\033[D");
-                            // }
                             break;
                     }
                 }
@@ -538,6 +561,7 @@ void read_input_raw(char *buffer) {
         }
 
         if (c == '\t') {
+            // Autocomplete for exit
             if(len == 3 && strcmp(buffer, "exi") == 0){
                 printf("t ");
                 strcat(buffer, "t ");
@@ -595,6 +619,7 @@ void read_input_raw(char *buffer) {
                         tab_presses = 0;
                     }
                 }
+                free(lcp);
             }
             free_list(matches);
         }
@@ -646,18 +671,22 @@ int main(int argc, char *argv[]) {
         if(input_cmd[0]=='\0') continue;
 
         store_history(input_cmd);
-        char cmd_cpy[MAXN];
-        strcpy(cmd_cpy, input_cmd);
+        
+        StringList *cmd_list = custom_parse(input_cmd);
 
-        char *exec_argv[MAXN+1];
-        int exec_argc=0;
+        if (!cmd_list) continue;
 
-        custom_parse(input_cmd, exec_argv, &exec_argc);
+        if (cmd_list->count > 0) {
+            if(execute_command(cmd_list->items) == -1) {
+                free_list(cmd_list);
+                break;
+            }
+        }
 
-        if(execute_command(exec_argv) == -1) break;
+        free_list(cmd_list);
     }
 
     disableRawMode();
+    free_list(history);
     return 0;
 }
-
