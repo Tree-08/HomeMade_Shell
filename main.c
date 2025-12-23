@@ -22,6 +22,17 @@ typedef struct {
     int capacity;
 } StringList;
 
+StringList *history = NULL;
+
+StringList *init_string_list(){
+    StringList *list = malloc(sizeof(StringList));
+    list->count=0;
+    list->capacity=4;
+    list->items= malloc(list->capacity*sizeof(char *));
+
+    return list;
+}
+
 void free_list(StringList *list) {
     for (int i = 0; i < list->count; i++) {
         free(list->items[i]);
@@ -442,14 +453,90 @@ char *get_longest_common_prefix(StringList *list) {
     return lcp;
 }
 
+void store_history(char *cmd){
+    if(strlen(cmd) == 0) return;
+
+    if(history->count >0 && strcmp(history->items[history->count-1], cmd) == 0) return;
+
+    if(strlen(cmd) + history->count >= history->capacity){
+        history->capacity = 2*history->capacity;
+        history->items = realloc(history->items, history->capacity*sizeof(char *));
+    }
+
+    history->items[history->count++]=strdup(cmd);
+}
+
 void read_input_raw(char *buffer) {
     int len = 0;
+    int pos =0;
     char c;
     int tab_presses = 0;
 
     memset(buffer, 0, MAXN);
 
+    int history_idx = history ? history->count:0;
+    char curr_chr[MAXN] = {0}; 
+
     while (read(STDIN_FILENO, &c, 1) == 1) {
+
+        if (c == '\x1b') {
+            char seq[2];
+
+            if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+                read(STDIN_FILENO, &seq[1], 1) == 1) {
+                
+                if (seq[0] == '[') {
+                    switch (seq[1]) {
+                        case 'A': //UP 
+                            if(history && history_idx >0){
+                                if(history_idx == history->count){
+                                    strcpy(curr_chr, buffer);
+                                }
+                                history_idx--;
+
+                                printf("\033[2K\r$ ");
+
+                                strcpy(buffer, history->items[history_idx]);
+                                len =strlen(buffer);
+                                printf("%s", buffer);
+                                fflush(stdout);
+                            }
+                            break;
+                        case 'B': //DOWN
+                            if(history && history_idx< history->count){
+                                history_idx++;
+
+                                printf("\033[2K\r$ ");
+
+                                if (history_idx == history->count) {
+                                    strcpy(buffer, curr_chr);
+                                } else {
+                                    strcpy(buffer, history->items[history_idx]);
+                                }
+                                len = strlen(buffer);
+                                printf("%s", buffer);
+                                fflush(stdout);
+                            }
+                            break;
+                        case 'C': //RIGHT
+                            // if(pos < len){
+                            //     pos++;
+                            //     printf("\033[C");
+                            //     fflush(stdout);
+                            // }
+                            break;
+                        case 'D': //LEFT
+                            // if(pos>0){
+                            //     pos--;
+                            //     printf("\033[D");
+                            // }
+                            break;
+                    }
+                }
+            }
+            continue; 
+        }
+
         if (c == '\t') {
             if(len == 3 && strcmp(buffer, "exi") == 0){
                 printf("t ");
@@ -546,6 +633,8 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
 
+    history = init_string_list();
+
     while(true){
         char input_cmd[MAXN];
         printf("$ ");
@@ -556,6 +645,7 @@ int main(int argc, char *argv[]) {
 
         if(input_cmd[0]=='\0') continue;
 
+        store_history(input_cmd);
         char cmd_cpy[MAXN];
         strcpy(cmd_cpy, input_cmd);
 
