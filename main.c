@@ -9,6 +9,7 @@
 #include <termios.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #define MAXN 1024
 #define PMAXN 2048
@@ -166,13 +167,17 @@ int run_external(char **args, char *out_file, int fd_flags, bool is_err){
             }
             close(fd);
         }
+
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
         execv(full_path, args);
         perror("EXECV FAILED!");
         exit(EXIT_FAILURE);
     }
 
     else if(pid > 0){
-        waitpid(pid, &status, 0);
+        // WUNTRACED matlab CHILD stopped but not traced by ptrace
+        waitpid(pid, &status, WUNTRACED);
     }
 
     else perror("FORK FAILED!");
@@ -243,7 +248,6 @@ int execute_command(char **args){
             break;
         }
     }
-
 
     if(!built_diff) rtrn = run_external(args, out_file, fd_args, is_err);
     return rtrn;
@@ -538,6 +542,9 @@ int main(int argc, char *argv[]) {
   // Flush after every printf
     setbuf(stdout, NULL);
     enableRawMode();
+
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
 
     while(true){
         char input_cmd[MAXN];
